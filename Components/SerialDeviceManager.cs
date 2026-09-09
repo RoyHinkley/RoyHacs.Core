@@ -182,13 +182,14 @@ public class SerialDeviceManager : DeviceManager, ISerialDeviceManager,
             }
         }
 
-        if (ServiceCommand.IsBlank())
+        var serviceRequested = !ServiceCommand.IsBlank();
+        if (!serviceRequested)
         {
             ServiceDevice = this;
             ServiceRequest = "{idle}";
             SelectDeviceService();
         }
-        hurry = !ServiceCommand.IsBlank() || !serviceQ.IsEmpty;
+        hurry = serviceRequested || !serviceQ.IsEmpty;
 
         if (LogEverything) Log.Record($"SerialDeviceManager {Name}: ServiceCommand = \"{SerialController.Escape(ServiceCommand)}\", ResponsesExpected = {ResponsesExpected}, Hurry = {hurry}");
         return new SerialController.Command(ServiceCommand, ResponsesExpected, hurry);
