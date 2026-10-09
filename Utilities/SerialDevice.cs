@@ -942,7 +942,9 @@ public class SerialDevice : INotifyPropertyChanged
         // Two copy operations are needed if the message will wrap past the end
         // of the rx buffer. Block-copying like this is faster than a simple
         // byte-copy loop, whenever messages are >= 2 bytes long.
-        int availableBytes = Rxb_head > Rxb_write ? Rxb_head - Rxb_write : RXBUF_SIZE - Rxb_write + Rxb_head;
+        int availableBytes = Rxb_write >= Rxb_head
+            ? RXBUF_SIZE - (Rxb_write - Rxb_head) - 1
+            : Rxb_head - Rxb_write - 1;
         if (ErrorBufferOverflow = n > availableBytes)           // assignment, not comparison
         {
             // If this ever happens, RXBUF_SIZE is too small; increase it.
@@ -1006,7 +1008,7 @@ public class SerialDevice : INotifyPropertyChanged
             }
             catch (Exception e)
             {
-                Log?.Record($"SerialDevice @{PortSettings?.PortName} Receive exception: {e}"); 
+                Log?.Record($"SerialDevice @{PortSettings?.PortName} Receive exception: {e}");
             }
         }
         Log?.Record($"SerialDevice @{PortSettings?.PortName} ending Receive thread.");
