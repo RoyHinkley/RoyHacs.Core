@@ -23,11 +23,15 @@ public class EurothermFurnace : SerialTubeFurnace, IEurothermFurnace,
         SetpointRateLimitActiveStatus = 275, SetpointRateLimitUnits = 531
     }
     public enum AutoManualCode { Auto = 0, Manual = 1, Unknown = -1 }
-    public enum InstrumentModeCode { Normal = 0, Configuration = 2, Unknown = -1 }
+    public enum InstrumentModeCode { Normal = 0, Standby = 1, Configuration = 2, Unknown = -1 }
 
-    // can only be altered when InstrumentMode == Configuration
-    // attempting to set ControlType to Manual fails and generates an IllegalDataValue error
-    public enum ControlTypeCode { PID = 0, Manual = 2, Unknown = -1 }
+    // ControlType is a configuration parameter and is read-only in normal operating mode.
+    public enum ControlTypeCode
+    {
+        PID = 0, OnOff = 1, Manual = 2,
+        ValvePositionNoFeedback = 3, ValvePositionFeedback = 4,
+        Unknown = -1
+    }
 
     public enum SetpointRateLimitUnitsCode { Seconds = 0, Minutes = 1, Hours = 2, Unknown = -1 }
     public enum ResolutionCode { Full = 0, Integer = 1, Unknown = -1 }
@@ -239,7 +243,7 @@ public class EurothermFurnace : SerialTubeFurnace, IEurothermFurnace,
     int parameterValue = -1;
 
     InstrumentModeCode IDevice.InstrumentMode { get => instrumentMode; set => Ensure(ref instrumentMode, value); }
-    InstrumentModeCode instrumentMode= InstrumentModeCode.Unknown;
+    InstrumentModeCode instrumentMode = InstrumentModeCode.Unknown;
 
     ControlTypeCode IDevice.ControlType { get => controlType; set => Ensure(ref controlType, value); }
     ControlTypeCode controlType = ControlTypeCode.Unknown;
@@ -378,38 +382,11 @@ public class EurothermFurnace : SerialTubeFurnace, IEurothermFurnace,
     int EncodeTemperature(double n) => n.ToInt();
 
     //
-    string SetInstrumentMode(InstrumentModeCode im)
-    {
-        var setCommand = SetParameter(ParameterCode.InstrumentMode, (int)im);
-        ContactorDisengaged = true;
-        return SerialController.ServiceCommand != setCommand ? setCommand :
-            CheckParameter(ParameterCode.InstrumentMode);
-    }
-
-    string SetControlType()
-    {
-        // setting control type requires InstrumentMode == Configuration
-        if (Device.InstrumentMode != InstrumentModeCode.Configuration)
-            return SetInstrumentMode(InstrumentModeCode.Configuration);
-
-        // PID is the only permitted value
-        var setCommand = SetParameter(ParameterCode.ControlType, (int)ControlTypeCode.PID);
-        return SerialController.ServiceCommand != setCommand ? setCommand :
-            CheckParameter(ParameterCode.ControlType);
-    }
-
     string SetSetpoint()
     {
         var setCommand = SetParameter(ParameterCode.TargetSetpoint, EncodeTemperature(Config.Setpoint));
         return SerialController.ServiceCommand != setCommand ? setCommand :
             CheckParameter(ParameterCode.TargetSetpoint);
-    }
-
-    string SetSetpointRateLimitUnits()
-    {
-        var setCommand = SetParameter(ParameterCode.SetpointRateLimitUnits, (int)Config.SetpointRateLimitUnits);
-        return SerialController.ServiceCommand != setCommand ? setCommand :
-            CheckParameter(ParameterCode.SetpointRateLimitUnits);
     }
 
     string SetSetpointRateLimit()
@@ -497,10 +474,31 @@ public class EurothermFurnace : SerialTubeFurnace, IEurothermFurnace,
 
     #region Controller interactions
 
-    // Note: The ControlType cannot be altered unless the controller is
-    // in Configuration mode, but changing to Configuration mode
-    // releases the furnace power contactor, which requires human
-    // intervention to reset.
+    // Controller commissioning requirements:
+    //   Control type (CtrL, Modbus 512) = PID
+    //   Setpoint rate limit units (Modbus 531) = Config.SetpointRateLimitUnits
+    //   Modbus resolution (rES, Modbus 12550) = Full
+    //   Instrument mode (IM, Modbus 199) = Normal for operation
+    //
+    // Configuration parameters are read-only in normal operating mode.  Do not
+    // enter Configuration mode to change them here: doing so disables normal
+    // control, switches the outputs to a safe state, and exiting Configuration
+    // mode resets the controller for about five seconds.  Commission these
+    // settings at the controller; this class reads and validates them only.
+    bool configurationChecked;
+
+    void CheckConfiguration()
+    {
+        if (Device.InstrumentMode != InstrumentModeCode.Normal)
+            Notify.ConfigurationError($"{Name} must be placed in Normal instrument mode at the Eurotherm controller.");
+        if (Device.ControlType != ControlTypeCode.PID)
+            Notify.ConfigurationError($"{Name} Control Type must be configured for PID at the Eurotherm controller.");
+        if (Device.SetpointRateLimitUnits != Config.SetpointRateLimitUnits)
+            Notify.ConfigurationError($"{Name} Setpoint Rate Limit Units must be configured for {Config.SetpointRateLimitUnits} at the Eurotherm controller.");
+        if (Device.Resolution != ResolutionCode.Full)
+            Notify.ConfigurationError($"{Name} Modbus Resolution must be configured for Full at the Eurotherm controller.");
+    }
+
     protected override SerialController.Command SelectService()
     {
         string command;
@@ -516,22 +514,25 @@ public class EurothermFurnace : SerialTubeFurnace, IEurothermFurnace,
             if (LogEverything) Log.Record("Checking ControlType.");
             command = CheckParameter(ParameterCode.ControlType);
         }
-        else if (Device.ControlType != ControlTypeCode.PID)
+        else if (Device.SetpointRateLimitUnits == SetpointRateLimitUnitsCode.Unknown)
         {
-            command = SetControlType();   // the only reason IntrumentMode might not be "Normal"
+            if (LogEverything) Log.Record("Checking SetpointRateLimitUnits.");
+            command = CheckParameter(ParameterCode.SetpointRateLimitUnits);
         }
-        else if (Device.InstrumentMode != InstrumentModeCode.Normal)
+        else if (Device.Resolution == ResolutionCode.Unknown)
         {
-            Device.AlarmRelayActivated = true;
-            command = SetInstrumentMode(InstrumentModeCode.Normal);
+            if (LogEverything) Log.Record("Checking Resolution.");
+            command = CheckParameter(ParameterCode.Resolution);
+        }
+        else if (!configurationChecked)
+        {
+            CheckConfiguration();
+            configurationChecked = true;
+            command = "";
         }
         else if (Device.OutputRateLimit != Config.OutputRateLimit)
         {
             command = SetOutputRateLimit();
-        }
-        else if (Device.SetpointRateLimitUnits != SetpointRateLimitUnitsCode.Minutes)
-        {
-            command = SetSetpointRateLimitUnits();
         }
         else if (Device.SetpointRateLimit != Config.SetpointRateLimit)
         {
